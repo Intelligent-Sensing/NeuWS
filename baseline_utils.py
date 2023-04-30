@@ -1,3 +1,6 @@
+# Copyright (c) 2023 
+# Brandon Y. Feng, University of Maryland, College Park and Rice University. All rights reserved
+
 import os, random, time
 import numpy as np
 import torch

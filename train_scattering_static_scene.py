@@ -1,3 +1,6 @@
+# Copyright (c) 2023 
+# Brandon Y. Feng, University of Maryland, College Park and Rice University. All rights reserved
+
 import os, time, imageio, tqdm, argparse
 import matplotlib.pyplot as plt
 import scipy.io as sio

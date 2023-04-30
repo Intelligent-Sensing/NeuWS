@@ -1,3 +1,6 @@
+# Copyright (c) 2023 
+# Brandon Y. Feng, University of Maryland, College Park and Rice University. All rights reserved
+
 import scipy.io as sio
 import itertools, logging, warnings
 import argparse
