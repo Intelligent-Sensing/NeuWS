@@ -1,3 +1,5 @@
+Code for the paper "NeuWS: Neural Wavefront Shaping for Guidestar-Free Imaging Through Static and Dynamic Scattering Media" by Brandon Y. Feng, Haiyun Guo, Mingyang Xie, Vivek Boominathan, Manoj K. Sharma, Ashok Veeraraghavan, and Christopher A. Metzler.
+
 ## Setup
 ``` 
 !pip install aotools einops 
