@@ -9,11 +9,11 @@ Code for the paper "NeuWS: Neural Wavefront Shaping for Guidestar-Free Imaging T
 
 ## Run
 ### Reconstruct Experimental Data
+Place the experimental data in the folder `DATA_DIR/SCENE_NAME`. Set the variable `NUM_FRAMES` to the number of frames in the data. Then run the following command:
 ``` 
 python recon_exp_data.py \
-        --vis_freq -1 --num_t NUM_FRAMES --data_dir DATA_DIR \
-        --scene_name SCENE_NAME --num_epochs 1000 --batch_size 8 \
-        --max_intensity MAX_RAW_INTENSITY --silence_tqdm"
+        --scene_name SCENE_NAME --num_t NUM_FRAMES --data_dir DATA_DIR \
+        --vis_freq -1 --num_epochs 1000 --batch_size 8 --silence_tqdm"
 ```
 
 ### Static Simulation
