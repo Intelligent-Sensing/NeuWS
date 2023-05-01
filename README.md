@@ -33,6 +33,6 @@ python train_moving_digits.py --img_name moving_digits
 
 ### Run Baseline Experiments for Comparison
 ``` 
-python baseline_Katz.py --img_name d1-48 
+python baseline_IGWS.py --img_name d1-48 
 ```
 
