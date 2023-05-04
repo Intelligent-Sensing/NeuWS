@@ -8,108 +8,17 @@ from torch.fft import fft2, fftshift
 
 import numpy as np
 import torchvision.transforms
-from utils import compute_zernike_basis, fft_2xPad_Conv2D, fft_noPad_Conv2D
+from utils import compute_zernike_basis, fft_2xPad_Conv2D
 
-class G_backbone(nn.Module):
-    def __init__(self, width):
+
+class sine_act(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.act_func = nn.ReLU()
-        self.enc_layers = 6
-        enc_dim = [
-            1,
-            16,
-            32,
-            64,
-            64,
-            128,
-            128
-        ]
 
-        self.skips = [2, 3, 4]
-
-        for i in range(1, self.enc_layers+1):
-            setattr(
-                self, 
-                f'd_conv_{i}', 
-                nn.Conv2d(enc_dim[i-1], enc_dim[i], 5, stride=2, padding=2)
-            )
-
-        dec_dim = enc_dim
-        dec_dim[0] = 16
-
-        for i in range(1, self.enc_layers+1):
-            if i-1 in self.skips:
-                _out_dim = enc_dim[i-1]
-            else:
-                _out_dim = dec_dim[i-1]
-            setattr(
-                self, 
-                f'u_deconv_{i}', 
-                nn.ConvTranspose2d(dec_dim[i], _out_dim, 4, stride=2, padding=1)
-            )
-
-        self.out_conv = nn.Sequential(
-            nn.Conv2d(dec_dim[0], dec_dim[0], 3, stride=1, padding=1),
-            nn.Conv2d(dec_dim[0], 1, 3, stride=1, padding=1),
-        )
-        
-        self.width = width
-        self.noise = nn.Parameter(
-            torch.ones(1, 1, width, width).float(),
-            requires_grad=False)
-
-    def forward(self, x = None):
-        if x is None:
-            x = self.noise
-        else:
-            x = x.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-            x = self.noise * x
-
-        sk_x = []
-        for i in range(1, self.enc_layers+1):
-            x = getattr(self, f'd_conv_{i}')(x)
-            x = self.act_func(x)
-            if i in self.skips:
-                sk_x.append(x)
-
-        for j in range(1, self.enc_layers + 1):
-            i = self.enc_layers + 1 - j
-            x = getattr(self, f'u_deconv_{i}')(x)
-            x = self.act_func(x)
-            if i-1 in self.skips:
-                x = x + sk_x.pop(-1)
-
-        out = self.out_conv(x)
-
+    def forward(self, x):
+        out = torch.sin(x)
         return out
 
-
-class G_g(nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.net = G_backbone(width)
-        
-    def forward(self):
-        return np.pi * torch.tanh(self.net())
-
-class G_Im(nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.net = G_backbone(width)
-        self.out_act = nn.Identity()
-
-    def forward(self):
-        return self.out_act(self.net())
-
-class G_Vid(nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.net = G_backbone(width)
-        self.net.noise = nn.Parameter(torch.ones(1, 1, width, width).float(), requires_grad=False)
-        self.out_act = nn.Identity()
-
-    def forward(self, t=0):
-        return self.out_act(self.net(t))
 
 class G_Renderer(nn.Module):
     def __init__(self, in_dim=32, hidden_dim=32, num_layers=2, out_dim=1):
@@ -129,6 +38,7 @@ class G_Renderer(nn.Module):
     def forward(self, x):
         out = self.net(x)
         return out
+
 
 class G_FeatureTensor(nn.Module):
     def __init__(self, x_dim, y_dim, num_feats = 32, ds_factor = 1):
@@ -178,6 +88,7 @@ class G_Tensor(G_FeatureTensor):
         feats = self.sample()
         return self.renderer(feats).reshape([-1, 1, self.x_dim, self.y_dim])
 
+
 class G_PatchTensor(nn.Module):
     def __init__(self, width):
         super().__init__()
@@ -198,55 +109,99 @@ class G_PatchTensor(nn.Module):
         return torch.cat([left, right], axis=-2)
 
 
-class ZernNet(nn.Module):
-    def __init__(self, width, PSF_size, use_FFT=True):
-        super().__init__()
-        self.g_im = G_Im(width)
-        #self.g_g = G_g(PSF_size)
-        self.basis = nn.Parameter(compute_zernike_basis(num_polynomials=28, field_res=(PSF_size, PSF_size)).permute(1, 2, 0), requires_grad=False)
-        self.g_g = nn.Sequential(nn.Linear(28, 32), nn.GELU(), nn.Linear(32, 1))
-        self.use_FFT = use_FFT
+class Embedding(nn.Module):
+    def __init__(self, in_channels, N_freqs, logscale=True):
+        """
+        Defines a function that embeds x to (x, sin(2^k x), cos(2^k x), ...)
+        in_channels: number of input channels (3 for both xyz and direction)
+        """
+        super(Embedding, self).__init__()
+        self.N_freqs = N_freqs
+        self.in_channels = in_channels
+        self.funcs = [torch.sin, torch.cos]
+        self.out_channels = in_channels*(len(self.funcs)*N_freqs+1)
 
-    def forward(self, x_batch):
-        # Deep Image Prior outputs
-        I_est, g_out = self.g_im(), self.g_g(self.basis)
-        sim_phs = g_out.unsqueeze(0).permute(0, 3, 1, 2)
-        # Unit circle constraint
-        sim_g = torch.exp(1j * sim_phs)
-        _kernel = fftshift(fft2(sim_g * x_batch, norm="forward"), dim=[-2, -1]).abs() ** 2
-        _kernel = _kernel / torch.sum(_kernel, dim=[-2, -1], keepdim=True)
-        _kernel = _kernel.flip(2).flip(3)
-
-        if self.use_FFT:
-            y = fft_noPad_Conv2D(I_est, _kernel).squeeze()
+        if logscale:
+            self.freq_bands = 2**torch.linspace(0, N_freqs-1, N_freqs)
         else:
-            y = F.conv2d(I_est, _kernel, padding='same').squeeze()
+            self.freq_bands = torch.linspace(1, 2**(N_freqs-1), N_freqs)
 
-        return y, _kernel, sim_g, sim_phs, I_est
+    def forward(self, x):
+        """
+        Embeds x to (x, sin(2^k x), cos(2^k x), ...) 
+        Different from the paper, "x" is also in the output
+        See https://github.com/bmild/nerf/issues/12
+        Inputs:
+            x: (B, self.in_channels)
+        Outputs:
+            out: (B, self.out_channels)
+        """
+        out = [x]
+        for freq in self.freq_bands:
+            for func in self.funcs:
+                out += [func(freq*x)]
 
-class DIPNet(nn.Module):
-    def __init__(self, width, PSF_size, use_FFT=True):
+        return torch.cat(out, -1)
+
+
+class G_SpaceTime(nn.Module):
+    def __init__(self, x_width, y_width, bsize=8):
         super().__init__()
-        self.g_im = G_Im(width)
-        self.g_g = G_g(PSF_size)
-        self.use_FFT = use_FFT
 
-    def forward(self, x_batch):
-        # Deep Image Prior outputs
-        I_est, g_out = self.g_im(), self.g_g()
-        sim_phs = g_out
-        # Unit circle constraint
-        sim_g = torch.exp(1j * sim_phs)
-        _kernel = fftshift(fft2(sim_g * x_batch, norm="forward"), dim=[-2, -1]).abs() ** 2
-        _kernel = _kernel / torch.sum(_kernel, dim=[-2, -1], keepdim=True)
-        _kernel = _kernel.flip(2).flip(3)
+        hidden_dim, num_hidden_layers = 32, 3
 
-        if self.use_FFT:
-            y = fft_noPad_Conv2D(I_est, _kernel).squeeze()
-        else:
-            y = F.conv2d(I_est, _kernel, padding='same').squeeze()
+        self.spatial_net = G_FeatureTensor(x_width, y_width, hidden_dim, ds_factor=1)
+        self.x_width, self.y_width = x_width, y_width
 
-        return y, _kernel, sim_g, sim_phs, I_est
+        self.t0 = nn.Parameter(torch.randn(1), requires_grad=True)
+        self.t1 = nn.Parameter(torch.randn(1), requires_grad=True)
+
+        num_t_freq = 5
+        self.embedding_t = Embedding(1, num_t_freq) 
+        #t_dim = 1 + num_t_freq * 2 + 2
+        t_dim = 1 + 2
+
+        act_fn = sine_act()#nn.LeakyReLU(inplace=True)
+        layers = []
+        layers.append(nn.Linear(t_dim, hidden_dim))
+        for _ in range(num_hidden_layers):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(act_fn)
+        layers.append(nn.Linear(hidden_dim, 2))
+
+        self.warp_net = nn.Sequential(*layers)
+
+        xs = torch.linspace(-1, 1, steps=x_width)
+        ys = torch.linspace(-1, 1, steps=y_width)
+        x, y = torch.meshgrid(xs, ys, indexing='xy')
+        self.xy_basis = nn.Parameter(
+            torch.stack([x, y], axis=-1).unsqueeze(0).repeat(bsize, 1, 1, 1),
+            requires_grad=False
+        )
+        self.renderer = G_Renderer(in_dim=hidden_dim, hidden_dim=hidden_dim, num_layers=3)
+
+    def forward(self, t):
+        spatial_feats = self.spatial_net().unsqueeze(0).repeat(t.shape[0], 1, 1)
+        spatial_feats = spatial_feats.reshape(-1, self.x_width, self.y_width, spatial_feats.shape[-1])
+        spatial_feats = spatial_feats.permute(0, 3, 1, 2)
+
+        alpha = (t + 0.5).unsqueeze(-1)
+        t_emb = alpha * torch.ones_like(self.t1)
+        #t_emb = (t).unsqueeze(-1) * torch.ones_like(self.t1)
+        t_emb = t_emb.unsqueeze(-2).unsqueeze(-2).repeat(1, self.x_width, self.y_width, 1)
+        #t_emb = self.embedding_t(t_emb)
+
+        t_input = torch.cat([self.xy_basis[:t.shape[0]], t_emb], axis=-1)
+
+        motion = self.warp_net(t_input) * 0.1
+
+        feats = F.grid_sample(spatial_feats, motion + self.xy_basis[:t.shape[0]])
+        output = self.renderer(feats.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+        output = F.leaky_relu(output, 0.001)
+
+        return output
 
 
 class TemporalZernNet(nn.Module):
@@ -256,10 +211,9 @@ class TemporalZernNet(nn.Module):
 
         if not use_pe:
             self.basis = nn.Parameter(compute_zernike_basis(
-                num_polynomials=28, 
+                num_polynomials=28,
                 field_res=(PSF_size, PSF_size)).permute(1, 2, 0).unsqueeze(0).repeat(bsize, 1, 1, 1),
                 requires_grad=False)
-
         else:
             xs = torch.linspace(-1, 1, steps=PSF_size)
             ys = torch.linspace(-1, 1, steps=PSF_size)
@@ -306,7 +260,7 @@ class TemporalZernNet(nn.Module):
             g_in = self.basis[:t.shape[0]]
 
         g_out = self.g_g(g_in)
-        sim_phs = g_out.permute(0, 3, 1, 2) 
+        sim_phs = g_out.permute(0, 3, 1, 2)
         sim_g = torch.exp(1j * sim_phs)
 
         return I_est, sim_g, sim_phs
@@ -323,6 +277,57 @@ class TemporalZernNet(nn.Module):
             y = F.conv2d(I_est, _kernel, padding='same').squeeze()
 
         return y, _kernel, sim_g, sim_phs, I_est
+
+
+class StaticDiffuseNet(TemporalZernNet):
+    def __init__(self, width, PSF_size, phs_layers = 2, use_FFT=True, bsize=8, use_pe=False, static_phase=True):
+        super().__init__(width, PSF_size, phs_layers = phs_layers, use_FFT=use_FFT, bsize=bsize, use_pe=use_pe)
+
+        hidden_dim = 32
+        t_dim = 1 if not static_phase else 0
+        in_dim = self.basis.shape[-1]
+        act_fn = nn.LeakyReLU(inplace=True)
+        layers = []
+        layers.append(nn.Linear(t_dim + in_dim, hidden_dim))
+        for _ in range(phs_layers):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            # layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(act_fn)
+        layers.append(nn.Linear(hidden_dim, 2))
+        self.g_g = nn.Sequential(*layers)
+        self.static_phase = static_phase
+
+    def get_estimates(self, t):
+        I_est = self.g_im()
+
+        if not self.static_phase:
+            cat_grid = self.t_grid[:t.shape[0]] * t.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            g_in = torch.cat([self.basis[:t.shape[0]], cat_grid], dim = -1)
+        else:
+            cat_grid = self.t_grid[:t.shape[0]]
+            g_in = self.basis[:t.shape[0]]
+
+        g_out = self.g_g(g_in)
+
+        g_out = g_out.permute(0, 3, 1, 2)
+        sim_phs = g_out[:, 1:2]
+        sim_amp = g_out[:, 0:1]
+        sim_g = sim_amp * torch.exp(1j * sim_phs)
+
+        return I_est, sim_g, sim_phs
+
+    # def forward(self, x_batch, t):
+    #     I_est, sim_g, sim_phs = self.get_estimates(t)
+    #     _kernel = fftshift(fft2(sim_g * x_batch, norm="forward"), dim=[-2, -1]).abs() ** 2
+    #     _kernel = _kernel / torch.sum(_kernel, dim=[-2, -1], keepdim=True)
+    #     _kernel = _kernel.flip(2).flip(3)
+    #
+    #     if self.use_FFT:
+    #         y = fft_2xPad_Conv2D(I_est, _kernel).squeeze()
+    #     else:
+    #         y = F.conv2d(I_est, _kernel, padding='same').squeeze()
+    #
+    #     return y, _kernel, sim_g, sim_phs, I_est
 
 
 class MovingTemporalZernNet(TemporalZernNet):
@@ -355,7 +360,7 @@ class MovingTemporalZernNet(TemporalZernNet):
 
         g_out = self.g_g(g_in)
 
-        sim_phs = g_out.permute(0, 3, 1, 2) 
+        sim_phs = g_out.permute(0, 3, 1, 2)
         # Unit circle constraint
         sim_g = torch.exp(1j * sim_phs)
 
@@ -382,3 +387,75 @@ class MovingTemporalZernNet(TemporalZernNet):
             y = torch.stack(y, axis=0)
 
         return y, _kernel, sim_g, sim_phs, I_est
+
+
+class MovingDiffuse(TemporalZernNet):
+    def __init__(self, width, PSF_size, phs_layers = 5, use_FFT=True, bsize=8, use_pe=False, static_phase=True):
+        super().__init__(width, PSF_size, phs_layers=phs_layers, use_FFT=use_FFT, bsize=bsize, static_phase=static_phase)
+        self.g_im = G_SpaceTime(width, width, bsize)
+
+        self.PSF_size = PSF_size
+
+        t_dim = 3 if not static_phase else 0
+        in_dim = self.basis.shape[-1]
+        hidden_dim = 32
+
+        act_fn = nn.LeakyReLU(inplace=True)
+        layers = []
+        layers.append(nn.Linear(t_dim + in_dim, hidden_dim))
+        for _ in range(phs_layers):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(act_fn)
+        layers.append(nn.Linear(hidden_dim, 2))
+
+        self.g_g = nn.Sequential(*layers)
+        self.static_phase = static_phase
+
+    def get_estimates(self, t, return_amp=False):
+
+        I_est = self.g_im(t)
+
+        if not self.static_phase:
+            cat_grid = self.t_grid[:t.shape[0]] * t.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            cat_grid = torch.cat([cat_grid, torch.cos(cat_grid), torch.sin(cat_grid)], dim = -1)
+            g_in = torch.cat([self.basis[:t.shape[0]], cat_grid], dim = -1)
+
+        else:
+            g_in = self.basis[:t.shape[0]]
+
+        g_out = self.g_g(g_in)
+        g_out = g_out.permute(0, 3, 1, 2)
+
+        sim_phs = g_out[:, 1:2]
+        sim_amp = g_out[:, 0:1]
+        sim_g = sim_amp * torch.exp(1j * sim_phs)
+        if return_amp:
+            return I_est, sim_g, sim_phs, sim_amp
+
+        return I_est, sim_g, sim_phs,
+
+    def forward(self, x_batch, t):
+        I_est, sim_g, sim_phs = self.get_estimates(t)
+
+        _kernel = fftshift(fft2(sim_g * x_batch, norm="forward"), dim=[-2, -1]).abs() ** 2
+        _factor = torch.sum(_kernel, dim=[-2, -1], keepdim=True)
+        _kernel = _kernel / _factor
+        _kernel = _kernel.flip(2).flip(3)
+
+        if self.use_FFT:
+            y = []
+            for i in range(len(t)):
+                y.append(fft_2xPad_Conv2D(I_est[i:i+1], _kernel[i:i+1]).squeeze())
+            y = torch.stack(y, axis=0)
+        else:
+            y = []
+            for i in range(len(t)):
+                y.append(F.conv2d(I_est[i:i+1], _kernel[i:i+1], padding='same').squeeze())
+            y = torch.stack(y, axis=0)
+
+        return y, _kernel, sim_g, sim_phs, I_est
+
+
+
+
