@@ -13,7 +13,7 @@ pip install torch==1.12.0+cu113 torchvision==0.13.0+cu113 --extra-index-url http
 We assume access to a GPU with CUDA 11.3.1 installed/supported.
 
 ## Dataset
-Please download a NeuWS dataset from https://doi.org/10.5061/dryad.6t1g1jx42.
+Please download a NeuWS dataset from https://doi.org/10.5061/dryad.6t1g1jx42. The dataset is also available at https://rice.app.box.com/s/1fbdvj0w7x2xugzs94a02hnagkt7dwvr.
 
 ## Reconstruct Experimental Data
 
